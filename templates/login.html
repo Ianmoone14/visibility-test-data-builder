@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — Visibility Test Data Builder</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <h1>Visibility Test Data Builder</h1>
+    <p class="sub">Sign in to continue</p>
+    <form id="login-form" class="form">
+      <label>
+        Username
+        <input name="username" autocomplete="username" required autofocus />
+      </label>
+      <label>
+        Password
+        <input name="password" type="password" autocomplete="current-password" required />
+      </label>
+      <button type="submit" class="btn btn-primary">Sign in</button>
+    </form>
+    <p id="login-error" class="error" hidden></p>
+  </div>
+  <script>
+    const form = document.getElementById("login-form");
+    const errorEl = document.getElementById("login-error");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorEl.hidden = true;
+      const payload = {
+        username: form.username.value.trim(),
+        password: form.password.value,
+      };
+      try {
+        const res = await fetch("/api/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          errorEl.textContent = data.detail || "Login failed";
+          errorEl.hidden = false;
+          return;
+        }
+        window.location.href = "/";
+      } catch {
+        errorEl.textContent = "Could not reach server";
+        errorEl.hidden = false;
+      }
+    });
+  </script>
+</body>
+</html>
