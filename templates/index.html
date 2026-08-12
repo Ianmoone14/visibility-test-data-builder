@@ -15,48 +15,55 @@
         <h1>Visibility Test Data Builder</h1>
         <p>Create expected UI visibility data for test scenarios</p>
       </div>
-      <nav class="nav" aria-label="Main">
-        <button type="button" class="nav-btn active" data-view="buttons">Buttons</button>
-        <button type="button" class="nav-btn" data-view="templates">Templates</button>
-        <button type="button" class="nav-btn" data-view="scenarios">Scenarios</button>
-      </nav>
+      <div class="top-right">
+        <nav class="nav" aria-label="Main">
+          <button type="button" class="nav-btn" data-view="elements" id="nav-elements" {% if user.role == 'manual_tester' %}hidden{% endif %}>Elements</button>
+          <button type="button" class="nav-btn" data-view="templates">Templates</button>
+          <button type="button" class="nav-btn" data-view="scenarios">Scenarios</button>
+          <button type="button" class="nav-btn" data-view="users" id="nav-users" {% if user.role != 'admin' %}hidden{% endif %}>Users</button>
+        </nav>
+        <div class="user-box">
+          <span id="current-user-label">{{ user.username }} · {{ user.role_label }}</span>
+          <button type="button" class="btn btn-sm" id="logout-btn">Log out</button>
+        </div>
+      </div>
     </header>
 
-    <!-- VIEW: Buttons -->
-    <section id="view-buttons" class="view panel">
+    <!-- VIEW: Elements -->
+    <section id="view-elements" class="view panel">
       <div class="view-head">
         <div>
-          <h2>Buttons</h2>
-          <p class="sub">Add UI buttons once. Reuse them in templates and scenarios.</p>
+          <h2>Elements</h2>
+          <p class="sub">Add UI elements once (buttons, fields, sections, …). Reuse them in templates and scenarios.</p>
         </div>
       </div>
 
       <div class="split">
         <div class="split-side">
-          <h3>Add button</h3>
+          <h3>Add element</h3>
           <form id="element-form" class="form">
             <label>
               Display name
-              <input name="display_name" placeholder="Submit" required />
+              <input name="display_name" placeholder="Email" required />
             </label>
             <label>
               Technical key
-              <input name="technical_key" placeholder="submit_button" required />
+              <input name="technical_key" placeholder="Email field" required />
             </label>
             <label>
               Group <span class="opt">optional</span>
-              <input name="group_name" placeholder="Request actions" list="group-suggestions" />
+              <input name="group_name" placeholder="Form fields" list="group-suggestions" />
               <datalist id="group-suggestions"></datalist>
             </label>
-            <button type="submit" class="btn btn-primary">Add button</button>
+            <button type="submit" class="btn btn-primary">Add element</button>
           </form>
           <p id="element-error" class="error" hidden></p>
         </div>
 
         <div class="split-main">
           <div class="toolbar">
-            <h3>All buttons <span id="elements-count" class="count"></span></h3>
-            <input type="search" id="element-search" class="search" placeholder="Search buttons" />
+            <h3>All elements <span id="elements-count" class="count"></span></h3>
+            <input type="search" id="element-search" class="search" placeholder="Search elements" />
           </div>
           <div id="group-filters" class="chips"></div>
           <div id="elements-list" class="list"></div>
@@ -69,7 +76,7 @@
       <div class="view-head">
         <div>
           <h2>Templates</h2>
-          <p class="sub">Save a set of buttons so you can reuse them in scenarios.</p>
+          <p class="sub">Save a set of elements so you can reuse them in scenarios.</p>
         </div>
       </div>
 
@@ -87,12 +94,12 @@
               <input name="description" placeholder="close, cancel, submit" />
             </label>
             <div>
-              <p class="label-text">Include buttons</p>
-              <button type="button" class="picker-trigger" id="open-button-modal">
-                <span id="selected-buttons-label">Select buttons…</span>
+              <p class="label-text">Include elements</p>
+              <button type="button" class="picker-trigger" id="open-element-modal">
+                <span id="selected-elements-label">Select elements…</span>
                 <span class="picker-caret">▾</span>
               </button>
-              <div id="selected-buttons-preview" class="selected-preview"></div>
+              <div id="selected-elements-preview" class="selected-preview"></div>
               <div id="template-element-picker" class="sr-only" aria-hidden="true"></div>
             </div>
             <div class="controls tight">
@@ -115,7 +122,7 @@
       <div class="view-head">
         <div>
           <h2>Scenarios</h2>
-          <p class="sub">Start quickly, add buttons or templates, set Visible / Hidden, copy test data.</p>
+          <p class="sub">Start quickly, add elements or templates, set Visible / Hidden, copy test data.</p>
         </div>
       </div>
 
@@ -160,14 +167,14 @@
         </div>
 
         <div class="picker-row">
-          <div class="fancy-picker" id="button-picker">
-            <button type="button" class="picker-trigger" id="button-picker-trigger">
-              <span>Add button</span>
+          <div class="fancy-picker" id="element-picker">
+            <button type="button" class="picker-trigger" id="element-picker-trigger">
+              <span>Add element</span>
               <span class="picker-caret">▾</span>
             </button>
-            <div class="picker-menu" id="button-picker-menu" hidden>
-              <input type="search" id="button-picker-search" placeholder="Search buttons…" />
-              <div class="picker-options" id="button-picker-options"></div>
+            <div class="picker-menu" id="element-picker-menu" hidden>
+              <input type="search" id="element-picker-search" placeholder="Search elements…" />
+              <div class="picker-options" id="element-picker-options"></div>
             </div>
           </div>
 
@@ -206,30 +213,78 @@
         </div>
       </div>
     </section>
+
+    <!-- VIEW: Users (admin) -->
+    <section id="view-users" class="view panel" hidden>
+      <div class="view-head">
+        <div>
+          <h2>Users</h2>
+          <p class="sub">Admin only — create accounts and assign roles.</p>
+        </div>
+      </div>
+
+      <div class="split">
+        <div class="split-side">
+          <h3>Add user</h3>
+          <form id="user-form" class="form">
+            <label>
+              Username
+              <input name="username" placeholder="jane.doe" required minlength="2" />
+            </label>
+            <label>
+              Password
+              <input name="password" type="password" placeholder="Min 6 characters" required minlength="6" />
+            </label>
+            <label>
+              Role
+              <select name="role" required>
+                <option value="manual_tester">Manual tester</option>
+                <option value="automation">Automation</option>
+                <option value="admin">Admin</option>
+              </select>
+            </label>
+            <button type="submit" class="btn btn-primary">Create user</button>
+          </form>
+          <p id="user-error" class="error" hidden></p>
+          <div class="role-help">
+            <p><strong>Admin</strong> — manage users, full access</p>
+            <p><strong>Automation</strong> — full access</p>
+            <p><strong>Manual tester</strong> — everything except Elements</p>
+          </div>
+        </div>
+        <div class="split-main">
+          <h3>All users</h3>
+          <div id="users-list" class="list"></div>
+        </div>
+      </div>
+    </section>
   </div>
 
-  <!-- Button picker modal -->
-  <div id="button-modal" class="modal" hidden>
+  <!-- Element picker modal -->
+  <div id="element-modal" class="modal" hidden>
     <div class="modal-backdrop" data-close-modal></div>
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="button-modal-title">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="element-modal-title">
       <div class="modal-head">
         <div>
-          <h3 id="button-modal-title">Select buttons</h3>
-          <p class="sub" id="button-modal-count">0 selected</p>
+          <h3 id="element-modal-title">Select elements</h3>
+          <p class="sub" id="element-modal-count">0 selected</p>
         </div>
         <button type="button" class="btn" data-close-modal>Close</button>
       </div>
       <div class="modal-toolbar">
-        <input type="search" id="button-modal-search" placeholder="Search by name, key, or group…" />
-        <button type="button" class="btn btn-sm" id="button-modal-clear">Clear</button>
+        <input type="search" id="element-modal-search" placeholder="Search by name, key, or group…" />
+        <button type="button" class="btn btn-sm" id="element-modal-clear">Clear</button>
       </div>
-      <div id="button-modal-list" class="modal-list"></div>
+      <div id="element-modal-list" class="modal-list"></div>
       <div class="modal-foot">
-        <button type="button" class="btn btn-primary" id="button-modal-done">Done</button>
+        <button type="button" class="btn btn-primary" id="element-modal-done">Done</button>
       </div>
     </div>
   </div>
 
+  <script>
+    window.__USER__ = {{ user_json | safe }};
+  </script>
   <script src="/static/app.js"></script>
 </body>
 </html>

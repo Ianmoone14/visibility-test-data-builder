@@ -2,26 +2,74 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import re
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse
+import logging
+import traceback
+
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field, field_validator
+from starlette.middleware.sessions import SessionMiddleware
+
+logger = logging.getLogger("vtdb")
 
 BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = BASE_DIR / "app.db"
-SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+SECRET_PATH = BASE_DIR / ".session_secret"
+TECHNICAL_KEY_RE = re.compile(r"^[A-Z][a-z0-9]*(?: [a-z0-9]+)*$")
+
+ROLE_ADMIN = "admin"
+ROLE_AUTOMATION = "automation"
+ROLE_MANUAL = "manual_tester"
+VALID_ROLES = {ROLE_ADMIN, ROLE_AUTOMATION, ROLE_MANUAL}
+ROLE_LABELS = {
+    ROLE_ADMIN: "Admin",
+    ROLE_AUTOMATION: "Automation",
+    ROLE_MANUAL: "Manual tester",
+}
+
+
+def get_secret_key() -> str:
+    env_key = os.environ.get("VTDB_SECRET")
+    if env_key:
+        return env_key
+    if SECRET_PATH.exists():
+        return SECRET_PATH.read_text(encoding="utf-8").strip()
+    key = secrets.token_hex(32)
+    SECRET_PATH.write_text(key, encoding="utf-8")
+    return key
+
 
 app = FastAPI(title="Visibility Test Data Builder")
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=get_secret_key(),
+    session_cookie="vtdb_session",
+    max_age=60 * 60 * 12,
+    same_site="lax",
+    https_only=False,
+)
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, exc: Exception):
+    """Log full traceback so Internal Server Error is diagnosable in the console."""
+    logger.error("Unhandled error on %s %s", request.method, request.url.path)
+    traceback.print_exc()
+    return PlainTextResponse("Internal Server Error", status_code=500)
 
 
 # ---------------------------------------------------------------------------
@@ -48,10 +96,48 @@ def db_session():
         conn.close()
 
 
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000
+    ).hex()
+    return f"{salt}${digest}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    try:
+        salt, digest = stored.split("$", 1)
+    except ValueError:
+        return False
+    check = hashlib.pbkdf2_hmac(
+        "sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000
+    ).hex()
+    return secrets.compare_digest(check, digest)
+
+
+def public_user(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    return {
+        "id": data["id"],
+        "username": data["username"],
+        "role": data["role"],
+        "role_label": ROLE_LABELS.get(data["role"], data["role"]),
+        "created_at": data.get("created_at"),
+    }
+
+
 def init_db() -> None:
     with db_session() as conn:
         conn.executescript(
             """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
             CREATE TABLE IF NOT EXISTS elements (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 display_name TEXT NOT NULL,
@@ -93,6 +179,55 @@ def init_db() -> None:
             );
             """
         )
+        existing = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+        if existing == 0:
+            conn.execute(
+                """
+                INSERT INTO users (username, password_hash, role)
+                VALUES (?, ?, ?)
+                """,
+                ("user", hash_password("Bojan1254"), ROLE_ADMIN),
+            )
+
+
+def fetch_user(conn: sqlite3.Connection, user_id: int) -> dict[str, Any] | None:
+    row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def fetch_user_by_username(
+    conn: sqlite3.Connection, username: str
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+        (username,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_current_user(request: Request) -> dict[str, Any]:
+    user_id = request.session.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    with db_session() as conn:
+        user = fetch_user(conn, int(user_id))
+    if not user:
+        request.session.clear()
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
+
+
+def require_roles(*roles: str):
+    allowed = set(roles)
+
+    def dependency(
+        user: dict[str, Any] = Depends(get_current_user),
+    ) -> dict[str, Any]:
+        if user["role"] not in allowed:
+            raise HTTPException(status_code=403, detail="Permission denied")
+        return user
+
+    return dependency
 
 
 @app.on_event("startup")
@@ -103,6 +238,17 @@ def on_startup() -> None:
 # ---------------------------------------------------------------------------
 # Models
 # ---------------------------------------------------------------------------
+
+def normalize_technical_key(value: str) -> str:
+    """First letter capital; words separated by spaces. e.g. Email field."""
+    cleaned = re.sub(r"['\"]", "", value.strip())
+    cleaned = cleaned.replace("_", " ")
+    cleaned = re.sub(r"[^A-Za-z0-9 ]+", " ", cleaned)
+    cleaned = re.sub(r" +", " ", cleaned).strip().lower()
+    if not cleaned:
+        raise ValueError("technical_key is required")
+    return cleaned[0].upper() + cleaned[1:]
+
 
 class ElementCreate(BaseModel):
     display_name: str = Field(..., min_length=1)
@@ -116,14 +262,27 @@ class ElementCreate(BaseModel):
             return value.strip()
         return value
 
+    @field_validator("display_name")
+    @classmethod
+    def capitalize_first_word(cls, value: str) -> str:
+        if not value:
+            return value
+        # First word must start with a capital letter
+        return value[0].upper() + value[1:]
+
     @field_validator("technical_key")
     @classmethod
-    def validate_snake_case(cls, value: str) -> str:
-        if not SNAKE_CASE_RE.match(value):
+    def validate_technical_key(cls, value: str) -> str:
+        try:
+            normalized = normalize_technical_key(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if not TECHNICAL_KEY_RE.match(normalized):
             raise ValueError(
-                "technical_key must be snake_case (e.g. submit_button)"
+                "technical_key must start with a capital letter and use "
+                "spaces between words (e.g. Email field)"
             )
-        return value
+        return normalized
 
 
 class TemplateCreate(BaseModel):
@@ -188,6 +347,66 @@ class ScenarioElementVisibility(BaseModel):
 
 class ApplyTemplateRequest(BaseModel):
     template_id: int
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+    @field_validator("username", "password", mode="before")
+    @classmethod
+    def strip_strings(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class UserCreate(BaseModel):
+    username: str = Field(..., min_length=2, max_length=50)
+    password: str = Field(..., min_length=6, max_length=128)
+    role: str
+
+    @field_validator("username", "password", mode="before")
+    @classmethod
+    def strip_strings(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        value = value.strip()
+        if value not in VALID_ROLES:
+            raise ValueError(
+                "role must be admin, automation, or manual_tester"
+            )
+        return value
+
+
+class UserRoleUpdate(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def validate_role(cls, value: str) -> str:
+        value = value.strip()
+        if value not in VALID_ROLES:
+            raise ValueError(
+                "role must be admin, automation, or manual_tester"
+            )
+        return value
+
+
+class UserPasswordUpdate(BaseModel):
+    password: str = Field(..., min_length=6, max_length=128)
+
+    @field_validator("password", mode="before")
+    @classmethod
+    def strip_password(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -291,12 +510,59 @@ def format_python_dict(mapping: dict[str, bool]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Pages
+# Pages + auth
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    user_id = request.session.get("user_id")
+    if not user_id:
+        return RedirectResponse(url="/login", status_code=303)
+    with db_session() as conn:
+        user = fetch_user(conn, int(user_id))
+    if not user:
+        request.session.clear()
+        return RedirectResponse(url="/login", status_code=303)
+    return templates.TemplateResponse(
+        "index.html",
+        {
+            "request": request,
+            "user": public_user(user),
+            "user_json": json.dumps(public_user(user)),
+        },
+    )
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page(request: Request):
+    if request.session.get("user_id"):
+        return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request})
+
+
+@app.get("/api/me")
+def me(user: dict[str, Any] = Depends(get_current_user)):
+    return public_user(user)
+
+
+@app.post("/api/login")
+def login(payload: LoginRequest, request: Request):
+    username = payload.username.strip()
+    password = payload.password
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password are required")
+    with db_session() as conn:
+        user = fetch_user_by_username(conn, username)
+        if not user or not verify_password(password, user["password_hash"]):
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        request.session["user_id"] = user["id"]
+        return public_user(user)
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    request.session.clear()
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +570,10 @@ def index(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/elements")
-def list_elements(search: str = Query("", alias="search")):
+def list_elements(
+    search: str = Query("", alias="search"),
+    user: dict[str, Any] = Depends(get_current_user),
+):
     search = search.strip()
     with db_session() as conn:
         if search:
@@ -327,7 +596,10 @@ def list_elements(search: str = Query("", alias="search")):
 
 
 @app.post("/api/elements", status_code=201)
-def create_element(payload: ElementCreate):
+def create_element(
+    payload: ElementCreate,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN, ROLE_AUTOMATION)),
+):
     if not payload.display_name:
         raise HTTPException(status_code=400, detail="display_name is required")
     try:
@@ -348,7 +620,10 @@ def create_element(payload: ElementCreate):
 
 
 @app.delete("/api/elements/{element_id}")
-def delete_element(element_id: int):
+def delete_element(
+    element_id: int,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN, ROLE_AUTOMATION)),
+):
     with db_session() as conn:
         fetch_element(conn, element_id)
         conn.execute("DELETE FROM elements WHERE id = ?", (element_id,))
@@ -360,7 +635,7 @@ def delete_element(element_id: int):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/templates")
-def list_templates():
+def list_templates(user: dict[str, Any] = Depends(get_current_user)):
     with db_session() as conn:
         rows = conn.execute(
             "SELECT * FROM templates ORDER BY name"
@@ -369,7 +644,10 @@ def list_templates():
 
 
 @app.post("/api/templates", status_code=201)
-def create_template(payload: TemplateCreate):
+def create_template(
+    payload: TemplateCreate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     if not payload.name:
         raise HTTPException(status_code=400, detail="name is required")
     if not payload.element_ids:
@@ -406,7 +684,11 @@ def create_template(payload: TemplateCreate):
 
 
 @app.put("/api/templates/{template_id}")
-def update_template(template_id: int, payload: TemplateUpdate):
+def update_template(
+    template_id: int,
+    payload: TemplateUpdate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         current = get_template_with_elements(conn, template_id)
         name = payload.name if payload.name is not None else current["name"]
@@ -463,12 +745,14 @@ def update_template(template_id: int, payload: TemplateUpdate):
 
 
 @app.delete("/api/templates/{template_id}")
-def delete_template(template_id: int):
+def delete_template(
+    template_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         get_template_with_elements(conn, template_id)
         conn.execute("DELETE FROM templates WHERE id = ?", (template_id,))
     return {"ok": True}
-
 
 # ---------------------------------------------------------------------------
 # Scenarios API
@@ -488,7 +772,7 @@ def next_untitled_scenario_name(conn: sqlite3.Connection) -> str:
 
 
 @app.get("/api/scenarios")
-def list_scenarios():
+def list_scenarios(user: dict[str, Any] = Depends(get_current_user)):
     with db_session() as conn:
         rows = conn.execute(
             "SELECT * FROM scenarios ORDER BY name"
@@ -497,7 +781,10 @@ def list_scenarios():
 
 
 @app.post("/api/scenarios", status_code=201)
-def create_scenario(payload: ScenarioCreate):
+def create_scenario(
+    payload: ScenarioCreate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     try:
         with db_session() as conn:
             name = payload.name or next_untitled_scenario_name(conn)
@@ -535,7 +822,10 @@ def create_scenario(payload: ScenarioCreate):
 
 
 @app.get("/api/scenarios/{scenario_id}")
-def get_scenario(scenario_id: int):
+def get_scenario(
+    scenario_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         scenario = fetch_scenario(conn, scenario_id)
         scenario["elements"] = get_scenario_elements(conn, scenario_id)
@@ -543,7 +833,11 @@ def get_scenario(scenario_id: int):
 
 
 @app.put("/api/scenarios/{scenario_id}")
-def update_scenario(scenario_id: int, payload: ScenarioUpdate):
+def update_scenario(
+    scenario_id: int,
+    payload: ScenarioUpdate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         scenario = fetch_scenario(conn, scenario_id)
         name = payload.name if payload.name is not None else scenario["name"]
@@ -574,7 +868,10 @@ def update_scenario(scenario_id: int, payload: ScenarioUpdate):
 
 
 @app.delete("/api/scenarios/{scenario_id}")
-def delete_scenario(scenario_id: int):
+def delete_scenario(
+    scenario_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
         conn.execute("DELETE FROM scenarios WHERE id = ?", (scenario_id,))
@@ -582,7 +879,11 @@ def delete_scenario(scenario_id: int):
 
 
 @app.post("/api/scenarios/{scenario_id}/elements", status_code=201)
-def add_scenario_element(scenario_id: int, payload: ScenarioElementAdd):
+def add_scenario_element(
+    scenario_id: int,
+    payload: ScenarioElementAdd,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
         fetch_element(conn, payload.element_id)
@@ -616,7 +917,10 @@ def add_scenario_element(scenario_id: int, payload: ScenarioElementAdd):
 
 @app.put("/api/scenarios/{scenario_id}/elements/{element_id}")
 def update_scenario_element_visibility(
-    scenario_id: int, element_id: int, payload: ScenarioElementVisibility
+    scenario_id: int,
+    element_id: int,
+    payload: ScenarioElementVisibility,
+    user: dict[str, Any] = Depends(get_current_user),
 ):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
@@ -649,7 +953,11 @@ def update_scenario_element_visibility(
 
 
 @app.delete("/api/scenarios/{scenario_id}/elements/{element_id}")
-def remove_scenario_element(scenario_id: int, element_id: int):
+def remove_scenario_element(
+    scenario_id: int,
+    element_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
         result = conn.execute(
@@ -673,7 +981,11 @@ def remove_scenario_element(scenario_id: int, element_id: int):
 
 
 @app.post("/api/scenarios/{scenario_id}/apply-template")
-def apply_template_to_scenario(scenario_id: int, payload: ApplyTemplateRequest):
+def apply_template_to_scenario(
+    scenario_id: int,
+    payload: ApplyTemplateRequest,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
         template = get_template_with_elements(conn, payload.template_id)
@@ -709,7 +1021,10 @@ def apply_template_to_scenario(scenario_id: int, payload: ApplyTemplateRequest):
 
 
 @app.get("/api/scenarios/{scenario_id}/export")
-def export_scenario(scenario_id: int):
+def export_scenario(
+    scenario_id: int,
+    user: dict[str, Any] = Depends(get_current_user),
+):
     with db_session() as conn:
         fetch_scenario(conn, scenario_id)
         mapping = build_visibility_map(conn, scenario_id)
@@ -718,3 +1033,118 @@ def export_scenario(scenario_id: int):
             "python": format_python_dict(mapping),
             "json": json.dumps(mapping, indent=2),
         }
+
+
+# ---------------------------------------------------------------------------
+# Users API (admin only)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/users")
+def list_users(user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN))):
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM users ORDER BY username"
+        ).fetchall()
+        return [public_user(r) for r in rows]
+
+
+@app.post("/api/users", status_code=201)
+def create_user(
+    payload: UserCreate,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN)),
+):
+    username = payload.username.strip()
+    if not re.match(r"^[a-zA-Z0-9._-]{2,50}$", username):
+        raise HTTPException(
+            status_code=400,
+            detail="Username may use letters, numbers, dot, underscore, hyphen",
+        )
+    try:
+        with db_session() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO users (username, password_hash, role)
+                VALUES (?, ?, ?)
+                """,
+                (username, hash_password(payload.password), payload.role),
+            )
+            created = fetch_user(conn, cursor.lastrowid)
+            return public_user(created)
+    except sqlite3.IntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Username '{username}' already exists",
+        )
+
+
+@app.put("/api/users/{user_id}/role")
+def update_user_role(
+    user_id: int,
+    payload: UserRoleUpdate,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN)),
+):
+    with db_session() as conn:
+        target = fetch_user(conn, user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if (
+            target["role"] == ROLE_ADMIN
+            and payload.role != ROLE_ADMIN
+        ):
+            admin_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = ?",
+                (ROLE_ADMIN,),
+            ).fetchone()["c"]
+            if admin_count <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot remove the last admin",
+                )
+        conn.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (payload.role, user_id),
+        )
+        updated = fetch_user(conn, user_id)
+        return public_user(updated)
+
+
+@app.put("/api/users/{user_id}/password")
+def update_user_password(
+    user_id: int,
+    payload: UserPasswordUpdate,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN)),
+):
+    with db_session() as conn:
+        target = fetch_user(conn, user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        conn.execute(
+            "UPDATE users SET password_hash = ? WHERE id = ?",
+            (hash_password(payload.password), user_id),
+        )
+    return {"ok": True}
+
+
+@app.delete("/api/users/{user_id}")
+def delete_user(
+    user_id: int,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN)),
+):
+    if user["id"] == user_id:
+        raise HTTPException(status_code=400, detail="Cannot delete your own account")
+    with db_session() as conn:
+        target = fetch_user(conn, user_id)
+        if not target:
+            raise HTTPException(status_code=404, detail="User not found")
+        if target["role"] == ROLE_ADMIN:
+            admin_count = conn.execute(
+                "SELECT COUNT(*) AS c FROM users WHERE role = ?",
+                (ROLE_ADMIN,),
+            ).fetchone()["c"]
+            if admin_count <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot delete the last admin",
+                )
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+    return {"ok": True}

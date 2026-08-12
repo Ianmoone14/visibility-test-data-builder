@@ -15,9 +15,23 @@ Visibility is a boolean expectation only:
 - Database: local SQLite (`app.db`, created automatically)
 - Default port: `8000`
 
+## Roles
+
+| Role | Access |
+|------|--------|
+| **Admin** | Full app access + manage users |
+| **Automation** | Full app access (Elements, Templates, Scenarios) |
+| **Manual tester** | Templates + Scenarios (no Elements section) |
+
+Default admin account (created on first startup if no users exist):
+
+- Username: `user`
+- Password: `Bojan1254`
+
 ## Features
 
-- **Global element library** — store UI elements (`display_name`, unique snake_case `technical_key`, `group_name`) with search/filter
+- **Login / authorization** — session cookie auth with role-based access
+- **Global element library** — store UI elements (`display_name`, unique `technical_key`, `group_name`) with search/filter
 - **Templates** — reusable element sets that can be applied to a scenario without duplicating existing elements
 - **Visibility scenarios** — named scenarios with True/False toggles per element, persisted in SQLite
 - **Test data export** — read-only Python and JSON previews with copy buttons
@@ -42,7 +56,8 @@ visibility-test-data-builder/
 ├── README.md
 ├── app.db                     # auto-created on startup
 ├── templates/
-│   └── index.html
+│   ├── index.html
+│   └── login.html
 └── static/
     ├── style.css
     └── app.js
@@ -54,8 +69,8 @@ Python:
 
 ```python
 expected_visibility = {
-    "close_button": True,
-    "submit_button": False,
+    "Close button": True,
+    "Submit button": False,
 }
 ```
 
@@ -63,7 +78,7 @@ JSON:
 
 ```json
 {
-  "close_button": true,
-  "submit_button": false
+  "Close button": true,
+  "Submit button": false
 }
 ```

@@ -7,6 +7,7 @@ __pycache__/
 *.db-shm
 .idea/
 .vscode/
+.session_secret
 .env
 .DS_Store
 Thumbs.db

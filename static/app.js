@@ -2,20 +2,22 @@
   "use strict";
 
   const state = {
+    user: null,
+    users: [],
     elements: [],
     templates: [],
     scenarios: [],
     activeScenario: null,
     export: { python: "expected_visibility = {}", json: "{}" },
     keyManual: false,
-    view: "buttons",
+    view: "elements",
     groupFilter: "all",
     collapsedGroups: {},
     editingTemplateId: null,
-    buttonPickerQuery: "",
+    elementPickerQuery: "",
     templatePickerQuery: "",
     templateSelectedIds: [],
-    buttonModalQuery: "",
+    elementModalQuery: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -48,29 +50,66 @@
       .replace(/"/g, "&quot;");
   }
 
-  function snake(v) {
-    return v
-      .trim()
-      .toLowerCase()
+  function technicalKey(v, finalize = true) {
+    let s = String(v ?? "")
       .replace(/['"]/g, "")
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/_+/g, "_");
+      .replace(/_/g, " ")
+      .replace(/[^a-zA-Z0-9 ]+/g, " ");
+    const trailing = !finalize && /\s$/.test(s);
+    s = s.replace(/ +/g, " ");
+    if (finalize || !trailing) s = s.trim();
+    else s = s.trimStart().replace(/ +$/g, " ");
+    const core = s.trim().toLowerCase();
+    if (!core) return trailing ? " " : "";
+    const formatted = core.charAt(0).toUpperCase() + core.slice(1);
+    return trailing ? `${formatted} ` : formatted;
+  }
+
+  function canManageElements() {
+    return state.user && ["admin", "automation"].includes(state.user.role);
+  }
+
+  function canManageUsers() {
+    return state.user && state.user.role === "admin";
+  }
+
+  function allowedViews() {
+    const views = ["templates", "scenarios"];
+    if (canManageElements()) views.unshift("elements");
+    if (canManageUsers()) views.push("users");
+    return views;
+  }
+
+  function defaultView() {
+    return canManageElements() ? "elements" : "scenarios";
+  }
+
+  function applyRoleUI() {
+    const elementsNav = $("nav-elements");
+    const usersNav = $("nav-users");
+    if (elementsNav) elementsNav.hidden = !canManageElements();
+    if (usersNav) usersNav.hidden = !canManageUsers();
+    if (state.user) {
+      $("current-user-label").textContent = `${state.user.username} · ${state.user.role_label}`;
+    }
   }
 
   function viewFromHash() {
-    const hash = (location.hash || "").replace(/^#/, "");
-    if (["buttons", "templates", "scenarios"].includes(hash)) return hash;
-    return "buttons";
+    let hash = (location.hash || "").replace(/^#/, "");
+    if (hash === "buttons") hash = "elements";
+    const allowed = allowedViews();
+    if (allowed.includes(hash)) return hash;
+    return defaultView();
   }
 
   function showView(view, options = {}) {
     const resetScenario = options.resetScenario !== false;
     const skipHistory = options.skipHistory === true;
-    if (!["buttons", "templates", "scenarios"].includes(view)) view = "buttons";
+    const allowed = allowedViews();
+    if (!allowed.includes(view)) view = defaultView();
 
     state.view = view;
-    ["buttons", "templates", "scenarios"].forEach((name) => {
+    ["elements", "templates", "scenarios", "users"].forEach((name) => {
       const el = $(`view-${name}`);
       if (el) el.hidden = name !== view;
     });
@@ -85,6 +124,7 @@
         renderFancyPickers();
       }
     }
+    if (view === "users") loadUsers().catch((err) => toast(err.message, true));
 
     if (!skipHistory) {
       const target = `#${view}`;
@@ -124,6 +164,10 @@
       }
     }
     if (!res.ok) {
+      if (res.status === 401 && path !== "/api/login") {
+        window.location.href = "/login";
+        throw new Error("Not authenticated");
+      }
       const d = data?.detail;
       let message = "Request failed";
       if (typeof d === "string") message = d;
@@ -162,6 +206,50 @@
       if (b === "Ungrouped") return -1;
       return a.localeCompare(b);
     });
+  }
+
+  async function loadUsers() {
+    if (!canManageUsers()) return;
+    state.users = await api("/api/users");
+    renderUsers();
+  }
+
+  function renderUsers() {
+    const root = $("users-list");
+    if (!root) return;
+    if (!state.users.length) {
+      root.innerHTML = `<div class="empty">No users</div>`;
+      return;
+    }
+    root.innerHTML = state.users
+      .map((u) => {
+        const isSelf = state.user && u.id === state.user.id;
+        return `
+        <div class="item" data-id="${u.id}">
+          <div>
+            <p class="name">${esc(u.username)}${isSelf ? " (you)" : ""}</p>
+            <p class="key">${esc(u.role_label)}</p>
+          </div>
+          <div class="actions">
+            <select data-act="role" ${isSelf ? "disabled" : ""}>
+              <option value="manual_tester" ${
+                u.role === "manual_tester" ? "selected" : ""
+              }>Manual tester</option>
+              <option value="automation" ${
+                u.role === "automation" ? "selected" : ""
+              }>Automation</option>
+              <option value="admin" ${
+                u.role === "admin" ? "selected" : ""
+              }>Admin</option>
+            </select>
+            <button type="button" class="btn btn-sm" data-act="password">Set password</button>
+            <button type="button" class="btn btn-sm danger" data-act="del" ${
+              isSelf ? "disabled" : ""
+            }>Delete</button>
+          </div>
+        </div>`;
+      })
+      .join("");
   }
 
   async function loadElements(search = "") {
@@ -318,7 +406,7 @@
     if (countEl) countEl.textContent = list.length ? `(${list.length})` : "";
 
     if (!list.length) {
-      root.innerHTML = `<div class="empty">No buttons yet</div>`;
+      root.innerHTML = `<div class="empty">No elements yet</div>`;
       return;
     }
 
@@ -364,14 +452,14 @@
       .join("");
   }
 
-  function renderSelectedButtonsPreview() {
-    const label = $("selected-buttons-label");
-    const preview = $("selected-buttons-preview");
+  function renderSelectedElementsPreview() {
+    const label = $("selected-elements-label");
+    const preview = $("selected-elements-preview");
     const count = state.templateSelectedIds.length;
     if (label) {
       label.textContent = count
-        ? `${count} button${count === 1 ? "" : "s"} selected`
-        : "Select buttons…";
+        ? `${count} element${count === 1 ? "" : "s"} selected`
+        : "Select elements…";
     }
     if (!preview) return;
     if (!count) {
@@ -394,30 +482,30 @@
       state.templateSelectedIds = [...selectedIds];
     }
     syncHiddenPicker();
-    renderSelectedButtonsPreview();
+    renderSelectedElementsPreview();
   }
 
-  function openButtonModal() {
-    state.buttonModalQuery = "";
-    $("button-modal-search").value = "";
-    $("button-modal").hidden = false;
-    renderButtonModal();
-    $("button-modal-search").focus();
+  function openElementModal() {
+    state.elementModalQuery = "";
+    $("element-modal-search").value = "";
+    $("element-modal").hidden = false;
+    renderElementModal();
+    $("element-modal-search").focus();
   }
 
-  function closeButtonModal() {
-    $("button-modal").hidden = true;
+  function closeElementModal() {
+    $("element-modal").hidden = true;
     renderPicker();
   }
 
-  function renderButtonModal() {
-    const root = $("button-modal-list");
-    const countEl = $("button-modal-count");
+  function renderElementModal() {
+    const root = $("element-modal-list");
+    const countEl = $("element-modal-count");
     const selected = new Set(state.templateSelectedIds);
     countEl.textContent = `${selected.size} selected`;
 
     let list = state.elements;
-    const q = state.buttonModalQuery.trim().toLowerCase();
+    const q = state.elementModalQuery.trim().toLowerCase();
     if (q) {
       list = list.filter(
         (el) =>
@@ -428,7 +516,7 @@
     }
 
     if (!list.length) {
-      root.innerHTML = `<div class="empty">No matching buttons</div>`;
+      root.innerHTML = `<div class="empty">No matching elements</div>`;
       return;
     }
 
@@ -556,7 +644,7 @@
     const root = $("scenario-elements");
     const els = state.activeScenario?.elements || [];
     if (!els.length) {
-      root.innerHTML = `<div class="empty">Add buttons or apply a template</div>`;
+      root.innerHTML = `<div class="empty">Add elements or apply a template</div>`;
       return;
     }
     root.innerHTML = els
@@ -585,17 +673,17 @@
   }
 
   function closePickers() {
-    $("button-picker-menu").hidden = true;
+    $("element-picker-menu").hidden = true;
     $("template-picker-menu").hidden = true;
   }
 
   function renderFancyPickers() {
-    renderButtonPickerOptions();
+    renderElementPickerOptions();
     renderTemplatePickerOptions();
   }
 
-  function renderButtonPickerOptions() {
-    const root = $("button-picker-options");
+  function renderElementPickerOptions() {
+    const root = $("element-picker-options");
     if (!root) return;
     if (!state.activeScenario) {
       root.innerHTML = `<div class="picker-empty">Open a scenario first</div>`;
@@ -604,7 +692,7 @@
     const used = new Set(
       (state.activeScenario.elements || []).map((e) => e.element_id)
     );
-    const q = state.buttonPickerQuery.trim().toLowerCase();
+    const q = state.elementPickerQuery.trim().toLowerCase();
     let available = state.elements.filter((e) => !used.has(e.id));
     if (q) {
       available = available.filter(
@@ -615,7 +703,7 @@
       );
     }
     if (!available.length) {
-      root.innerHTML = `<div class="picker-empty">No matching buttons</div>`;
+      root.innerHTML = `<div class="picker-empty">No matching elements</div>`;
       return;
     }
     root.innerHTML = groupElements(available)
@@ -659,7 +747,7 @@
         return `
         <button type="button" class="picker-option" data-template-id="${t.id}">
           <span class="picker-option-name">${esc(t.name)}</span>
-          <span class="picker-option-key">${count} button${count === 1 ? "" : "s"}</span>
+          <span class="picker-option-key">${count} element${count === 1 ? "" : "s"}</span>
         </button>`;
       })
       .join("");
@@ -672,7 +760,7 @@
         return;
       }
       const el = state.elements.find((e) => e.id === elementId);
-      if (!el) throw new Error("Button not found");
+      if (!el) throw new Error("Element not found");
       state.activeScenario.elements.push({
         element_id: el.id,
         display_name: el.display_name,
@@ -682,7 +770,7 @@
       });
       renderWorkspace();
       refreshExport();
-      toast("Button added");
+      toast("Element added");
       return;
     }
     state.activeScenario = await api(
@@ -694,7 +782,7 @@
     );
     renderWorkspace();
     await refreshExport();
-    toast("Button added");
+    toast("Element added");
   }
 
   async function applyTemplateToActive(templateId) {
@@ -738,7 +826,7 @@
       return;
     }
     startDraft(template);
-    toast(`Draft ready · ${template.elements.length} buttons`);
+    toast(`Draft ready · ${template.elements.length} elements`);
   }
 
   async function copy(text, label) {
@@ -764,17 +852,49 @@
     });
   });
 
+  function capitalizeFirstWord(value) {
+    if (!value) return value;
+    return value.charAt(0).toUpperCase() + value.slice(1);
+  }
+
   const elementForm = $("element-form");
   elementForm.display_name.addEventListener("input", (e) => {
-    if (!state.keyManual) elementForm.technical_key.value = snake(e.target.value);
+    const input = e.target;
+    const start = input.selectionStart;
+    const end = input.selectionEnd;
+    const next = capitalizeFirstWord(input.value);
+    if (next !== input.value) {
+      input.value = next;
+      if (typeof start === "number") {
+        input.setSelectionRange(start, end);
+      }
+    }
+    if (!state.keyManual) elementForm.technical_key.value = technicalKey(input.value);
   });
-  elementForm.technical_key.addEventListener("input", () => {
+  elementForm.technical_key.addEventListener("input", (e) => {
     state.keyManual = true;
+    const input = e.target;
+    const start = input.selectionStart;
+    const next = technicalKey(input.value, false);
+    if (next !== input.value) {
+      input.value = next;
+      if (typeof start === "number") {
+        const pos = Math.min(start, next.length);
+        input.setSelectionRange(pos, pos);
+      }
+    }
   });
 
   elementForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     setError("element-error", "");
+    elementForm.display_name.value = capitalizeFirstWord(
+      elementForm.display_name.value.trim()
+    );
+    elementForm.technical_key.value = technicalKey(
+      elementForm.technical_key.value,
+      true
+    );
     try {
       await api("/api/elements", {
         method: "POST",
@@ -787,7 +907,7 @@
       elementForm.reset();
       state.keyManual = false;
       await loadElements($("element-search").value.trim());
-      toast("Button added");
+      toast("Element added");
     } catch (err) {
       setError("element-error", err.message);
     }
@@ -821,7 +941,7 @@
     const id = Number(item.dataset.id);
     try {
       if (btn.dataset.act === "del") {
-        if (!confirm("Delete this button?")) return;
+        if (!confirm("Delete this element?")) return;
         await api(`/api/elements/${id}`, { method: "DELETE" });
         await Promise.all([
           loadElements($("element-search").value.trim()),
@@ -946,17 +1066,17 @@
     }
   });
 
-  $("button-picker-trigger").addEventListener("click", (e) => {
+  $("element-picker-trigger").addEventListener("click", (e) => {
     e.stopPropagation();
-    const menu = $("button-picker-menu");
+    const menu = $("element-picker-menu");
     const open = menu.hidden;
     closePickers();
     if (open) {
       menu.hidden = false;
-      state.buttonPickerQuery = "";
-      $("button-picker-search").value = "";
-      renderButtonPickerOptions();
-      $("button-picker-search").focus();
+      state.elementPickerQuery = "";
+      $("element-picker-search").value = "";
+      renderElementPickerOptions();
+      $("element-picker-search").focus();
     }
   });
 
@@ -974,9 +1094,9 @@
     }
   });
 
-  $("button-picker-search").addEventListener("input", (e) => {
-    state.buttonPickerQuery = e.target.value;
-    renderButtonPickerOptions();
+  $("element-picker-search").addEventListener("input", (e) => {
+    state.elementPickerQuery = e.target.value;
+    renderElementPickerOptions();
   });
 
   $("template-picker-search").addEventListener("input", (e) => {
@@ -984,7 +1104,7 @@
     renderTemplatePickerOptions();
   });
 
-  $("button-picker-options").addEventListener("click", async (e) => {
+  $("element-picker-options").addEventListener("click", async (e) => {
     const opt = e.target.closest("[data-element-id]");
     if (!opt || !state.activeScenario) return;
     try {
@@ -1059,11 +1179,11 @@
     }
   });
 
-  $("open-button-modal").addEventListener("click", () => openButtonModal());
+  $("open-element-modal").addEventListener("click", () => openElementModal());
 
-  $("button-modal").addEventListener("click", (e) => {
+  $("element-modal").addEventListener("click", (e) => {
     if (e.target.closest("[data-close-modal]")) {
-      closeButtonModal();
+      closeElementModal();
       return;
     }
     const groupBtn = e.target.closest("[data-toggle-group]");
@@ -1076,12 +1196,12 @@
       const set = new Set(state.templateSelectedIds);
       ids.forEach((id) => (turnOn ? set.add(id) : set.delete(id)));
       state.templateSelectedIds = [...set];
-      renderButtonModal();
+      renderElementModal();
       return;
     }
   });
 
-  $("button-modal-list").addEventListener("change", (e) => {
+  $("element-modal-list").addEventListener("change", (e) => {
     const input = e.target.closest('input[type="checkbox"]');
     if (!input) return;
     const id = Number(input.value);
@@ -1089,22 +1209,22 @@
     if (input.checked) set.add(id);
     else set.delete(id);
     state.templateSelectedIds = [...set];
-    renderButtonModal();
+    renderElementModal();
   });
 
-  $("button-modal-search").addEventListener("input", (e) => {
-    state.buttonModalQuery = e.target.value;
-    renderButtonModal();
+  $("element-modal-search").addEventListener("input", (e) => {
+    state.elementModalQuery = e.target.value;
+    renderElementModal();
   });
 
-  $("button-modal-clear").addEventListener("click", () => {
+  $("element-modal-clear").addEventListener("click", () => {
     state.templateSelectedIds = [];
-    renderButtonModal();
+    renderElementModal();
   });
 
-  $("button-modal-done").addEventListener("click", () => closeButtonModal());
+  $("element-modal-done").addEventListener("click", () => closeElementModal());
 
-  $("selected-buttons-preview").addEventListener("click", (e) => {
+  $("selected-elements-preview").addEventListener("click", (e) => {
     const btn = e.target.closest("[data-remove-id]");
     if (!btn) return;
     const id = Number(btn.dataset.removeId);
@@ -1113,7 +1233,7 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("button-modal").hidden) closeButtonModal();
+    if (e.key === "Escape" && !$("element-modal").hidden) closeElementModal();
   });
 
   $("template-form").addEventListener("submit", async (e) => {
@@ -1183,14 +1303,106 @@
     copy(state.export.json, "JSON")
   );
 
+  $("logout-btn").addEventListener("click", async () => {
+    try {
+      await api("/api/logout", { method: "POST", body: "{}" });
+    } catch {
+      /* ignore */
+    }
+    window.location.href = "/login";
+  });
+
+  $("user-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    setError("user-error", "");
+    const form = e.target;
+    try {
+      await api("/api/users", {
+        method: "POST",
+        body: JSON.stringify({
+          username: form.username.value.trim(),
+          password: form.password.value,
+          role: form.role.value,
+        }),
+      });
+      form.reset();
+      await loadUsers();
+      toast("User created");
+    } catch (err) {
+      setError("user-error", err.message);
+    }
+  });
+
+  $("users-list").addEventListener("change", async (e) => {
+    const select = e.target.closest('select[data-act="role"]');
+    if (!select) return;
+    const id = Number(select.closest(".item").dataset.id);
+    try {
+      await api(`/api/users/${id}/role`, {
+        method: "PUT",
+        body: JSON.stringify({ role: select.value }),
+      });
+      await loadUsers();
+      toast("Role updated");
+    } catch (err) {
+      toast(err.message, true);
+      await loadUsers();
+    }
+  });
+
+  $("users-list").addEventListener("click", async (e) => {
+    const pwBtn = e.target.closest('button[data-act="password"]');
+    if (pwBtn) {
+      const id = Number(pwBtn.closest(".item").dataset.id);
+      const user = state.users.find((u) => u.id === id);
+      const password = prompt(
+        `New password for “${user?.username || id}” (min 6 characters):`
+      );
+      if (password === null) return;
+      const trimmed = password.trim();
+      if (trimmed.length < 6) {
+        toast("Password must be at least 6 characters", true);
+        return;
+      }
+      try {
+        await api(`/api/users/${id}/password`, {
+          method: "PUT",
+          body: JSON.stringify({ password: trimmed }),
+        });
+        toast("Password updated");
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
+
+    const btn = e.target.closest('button[data-act="del"]');
+    if (!btn) return;
+    const id = Number(btn.closest(".item").dataset.id);
+    const user = state.users.find((u) => u.id === id);
+    if (!confirm(`Delete user “${user?.username || id}”?`)) return;
+    try {
+      await api(`/api/users/${id}`, { method: "DELETE" });
+      await loadUsers();
+      toast("User deleted");
+    } catch (err) {
+      toast(err.message, true);
+    }
+  });
+
   async function init() {
     try {
+      state.user = window.__USER__ || (await api("/api/me"));
+      applyRoleUI();
       await Promise.all([loadElements(), loadTemplates(), loadScenarios()]);
       const initial = viewFromHash();
       history.replaceState({ view: initial }, "", `#${initial}`);
       showView(initial, { skipHistory: true });
+      applyRoleUI();
     } catch (err) {
-      toast(err.message, true);
+      if (!String(err.message).includes("Not authenticated")) {
+        toast(err.message, true);
+      }
     }
   }
 
