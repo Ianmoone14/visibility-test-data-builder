@@ -13,6 +13,7 @@
     view: "elements",
     groupFilter: "all",
     collapsedGroups: {},
+    editingElementId: null,
     editingTemplateId: null,
     elementPickerQuery: "",
     templatePickerQuery: "",
@@ -415,11 +416,14 @@
         const collapsed = !!state.collapsedGroups[group];
         return `
         <div class="group-block ${collapsed ? "collapsed" : ""}" data-group="${esc(group)}">
-          <button type="button" class="group-head" data-act="toggle-group">
-            <span class="chevron">${collapsed ? "▸" : "▾"}</span>
-            <span class="group-title">${esc(group)}</span>
-            <span class="group-count">${items.length}</span>
-          </button>
+          <div class="group-head-row">
+            <button type="button" class="group-head" data-act="toggle-group">
+              <span class="chevron">${collapsed ? "▸" : "▾"}</span>
+              <span class="group-title">${esc(group)}</span>
+              <span class="group-count">${items.length}</span>
+            </button>
+            <button type="button" class="btn btn-sm group-rename" data-act="rename-group" title="Rename group">Rename</button>
+          </div>
           <div class="group-body">
             ${items
               .map(
@@ -430,6 +434,7 @@
                   <p class="key">${esc(el.technical_key)}</p>
                 </div>
                 <div class="actions">
+                  <button type="button" class="btn btn-sm" data-act="edit">Edit</button>
                   <button type="button" class="btn btn-sm danger" data-act="del">Delete</button>
                 </div>
               </div>`
@@ -858,6 +863,33 @@
   }
 
   const elementForm = $("element-form");
+
+  function resetElementForm() {
+    elementForm.reset();
+    elementForm.edit_id.value = "";
+    state.editingElementId = null;
+    state.keyManual = false;
+    $("element-form-title").textContent = "Add element";
+    $("element-submit-btn").textContent = "Add element";
+    $("element-cancel-edit").hidden = true;
+    setError("element-error", "");
+  }
+
+  function startEditElement(el) {
+    state.editingElementId = el.id;
+    state.keyManual = true;
+    elementForm.edit_id.value = String(el.id);
+    elementForm.display_name.value = el.display_name || "";
+    elementForm.technical_key.value = el.technical_key || "";
+    elementForm.group_name.value = el.group_name || "";
+    $("element-form-title").textContent = "Edit element";
+    $("element-submit-btn").textContent = "Save changes";
+    $("element-cancel-edit").hidden = false;
+    setError("element-error", "");
+    elementForm.display_name.focus();
+    elementForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+
   elementForm.display_name.addEventListener("input", (e) => {
     const input = e.target;
     const start = input.selectionStart;
@@ -885,6 +917,8 @@
     }
   });
 
+  $("element-cancel-edit").addEventListener("click", () => resetElementForm());
+
   elementForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     setError("element-error", "");
@@ -895,19 +929,32 @@
       elementForm.technical_key.value,
       true
     );
+    const payload = {
+      display_name: elementForm.display_name.value,
+      technical_key: elementForm.technical_key.value,
+      group_name: elementForm.group_name.value.trim(),
+    };
+    const editId = Number(elementForm.edit_id.value || state.editingElementId || 0);
     try {
-      await api("/api/elements", {
-        method: "POST",
-        body: JSON.stringify({
-          display_name: elementForm.display_name.value,
-          technical_key: elementForm.technical_key.value,
-          group_name: elementForm.group_name.value,
-        }),
-      });
-      elementForm.reset();
-      state.keyManual = false;
-      await loadElements($("element-search").value.trim());
-      toast("Element added");
+      if (editId) {
+        await api(`/api/elements/${editId}`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        });
+        toast("Element updated");
+      } else {
+        await api("/api/elements", {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        toast("Element added");
+      }
+      resetElementForm();
+      await Promise.all([
+        loadElements($("element-search").value.trim()),
+        loadTemplates(),
+      ]);
+      if (state.activeScenario) await openScenario(state.activeScenario.id);
     } catch (err) {
       setError("element-error", err.message);
     }
@@ -926,6 +973,41 @@
   });
 
   $("elements-list").addEventListener("click", async (e) => {
+    const renameBtn = e.target.closest('[data-act="rename-group"]');
+    if (renameBtn) {
+      const block = renameBtn.closest(".group-block");
+      const oldName = block?.dataset.group || "";
+      const next = prompt(`Rename group “${oldName}” to:`, oldName === "Ungrouped" ? "" : oldName);
+      if (next === null) return;
+      const newName = next.trim();
+      if ((oldName === "Ungrouped" ? "" : oldName) === newName) return;
+      if (oldName !== "Ungrouped" && !newName) {
+        if (!confirm("Clear group name for all elements in this group?")) return;
+      }
+      try {
+        const result = await api("/api/elements/groups/rename", {
+          method: "PUT",
+          body: JSON.stringify({ old_name: oldName, new_name: newName }),
+        });
+        if (state.groupFilter === oldName) {
+          state.groupFilter = result.new_name || "all";
+        }
+        if (state.collapsedGroups[oldName] !== undefined) {
+          state.collapsedGroups[result.new_name] = state.collapsedGroups[oldName];
+          delete state.collapsedGroups[oldName];
+        }
+        await Promise.all([
+          loadElements($("element-search").value.trim()),
+          loadTemplates(),
+        ]);
+        if (state.activeScenario) await openScenario(state.activeScenario.id);
+        toast(`Group renamed · ${result.updated} element${result.updated === 1 ? "" : "s"}`);
+      } catch (err) {
+        toast(err.message, true);
+      }
+      return;
+    }
+
     const toggle = e.target.closest('[data-act="toggle-group"]');
     if (toggle) {
       const block = toggle.closest(".group-block");
@@ -940,9 +1022,16 @@
     if (!item) return;
     const id = Number(item.dataset.id);
     try {
+      if (btn.dataset.act === "edit") {
+        const el = state.elements.find((x) => x.id === id);
+        if (!el) return;
+        startEditElement(el);
+        return;
+      }
       if (btn.dataset.act === "del") {
         if (!confirm("Delete this element?")) return;
         await api(`/api/elements/${id}`, { method: "DELETE" });
+        if (state.editingElementId === id) resetElementForm();
         await Promise.all([
           loadElements($("element-search").value.trim()),
           loadTemplates(),

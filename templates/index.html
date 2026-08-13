@@ -40,8 +40,9 @@
 
       <div class="split">
         <div class="split-side">
-          <h3>Add element</h3>
+          <h3 id="element-form-title">Add element</h3>
           <form id="element-form" class="form">
+            <input type="hidden" name="edit_id" value="" />
             <label>
               Display name
               <input name="display_name" placeholder="Email" required />
@@ -55,7 +56,10 @@
               <input name="group_name" placeholder="Form fields" list="group-suggestions" />
               <datalist id="group-suggestions"></datalist>
             </label>
-            <button type="submit" class="btn btn-primary">Add element</button>
+            <div class="controls tight">
+              <button type="submit" class="btn btn-primary" id="element-submit-btn">Add element</button>
+              <button type="button" class="btn" id="element-cancel-edit" hidden>Cancel edit</button>
+            </div>
           </form>
           <p id="element-error" class="error" hidden></p>
         </div>

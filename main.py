@@ -285,6 +285,52 @@ class ElementCreate(BaseModel):
         return normalized
 
 
+class ElementUpdate(BaseModel):
+    display_name: str = Field(..., min_length=1)
+    technical_key: str = Field(..., min_length=1)
+    group_name: str = ""
+
+    @field_validator("display_name", "technical_key", "group_name", mode="before")
+    @classmethod
+    def strip_strings(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("display_name")
+    @classmethod
+    def capitalize_first_word(cls, value: str) -> str:
+        if not value:
+            return value
+        return value[0].upper() + value[1:]
+
+    @field_validator("technical_key")
+    @classmethod
+    def validate_technical_key(cls, value: str) -> str:
+        try:
+            normalized = normalize_technical_key(value)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        if not TECHNICAL_KEY_RE.match(normalized):
+            raise ValueError(
+                "technical_key must start with a capital letter and use "
+                "spaces between words (e.g. Email field)"
+            )
+        return normalized
+
+
+class GroupRename(BaseModel):
+    old_name: str
+    new_name: str
+
+    @field_validator("old_name", "new_name", mode="before")
+    @classmethod
+    def strip_strings(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
 class TemplateCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str = ""
@@ -612,6 +658,75 @@ def create_element(
                 (payload.display_name, payload.technical_key, payload.group_name),
             )
             return fetch_element(conn, cursor.lastrowid)
+    except sqlite3.IntegrityError:
+        raise HTTPException(
+            status_code=409,
+            detail=f"technical_key '{payload.technical_key}' already exists",
+        )
+
+
+@app.put("/api/elements/groups/rename")
+def rename_element_group(
+    payload: GroupRename,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN, ROLE_AUTOMATION)),
+):
+    old_name = payload.old_name
+    new_name = payload.new_name
+    # UI uses "Ungrouped" for empty group_name
+    old_db = "" if old_name.lower() == "ungrouped" else old_name
+    new_db = "" if new_name.lower() == "ungrouped" else new_name
+    if old_db == new_db:
+        return {"ok": True, "updated": 0}
+    with db_session() as conn:
+        if old_db == "":
+            cursor = conn.execute(
+                """
+                UPDATE elements
+                SET group_name = ?
+                WHERE TRIM(group_name) = '' OR group_name IS NULL
+                """,
+                (new_db,),
+            )
+        else:
+            cursor = conn.execute(
+                """
+                UPDATE elements
+                SET group_name = ?
+                WHERE group_name = ? COLLATE NOCASE
+                """,
+                (new_db, old_db),
+            )
+        updated = cursor.rowcount
+        if updated == 0:
+            raise HTTPException(status_code=404, detail="Group not found")
+        return {"ok": True, "updated": updated, "new_name": new_db or "Ungrouped"}
+
+
+@app.put("/api/elements/{element_id}")
+def update_element(
+    element_id: int,
+    payload: ElementUpdate,
+    user: dict[str, Any] = Depends(require_roles(ROLE_ADMIN, ROLE_AUTOMATION)),
+):
+    if not payload.display_name:
+        raise HTTPException(status_code=400, detail="display_name is required")
+    try:
+        with db_session() as conn:
+            fetch_element(conn, element_id)
+            conn.execute(
+                """
+                UPDATE elements
+                SET display_name = ?, technical_key = ?, group_name = ?
+                WHERE id = ?
+                """,
+                (
+                    payload.display_name,
+                    payload.technical_key,
+                    payload.group_name,
+                    element_id,
+                ),
+            )
+            return fetch_element(conn, element_id)
     except sqlite3.IntegrityError:
         raise HTTPException(
             status_code=409,

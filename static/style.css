@@ -503,14 +503,24 @@ button:focus-visible,
   background: #fff;
 }
 
+.group-head-row {
+  display: flex;
+  align-items: stretch;
+  border-bottom: 1px solid var(--line);
+  background: var(--soft);
+}
+
+.group-block.collapsed .group-head-row {
+  border-bottom: 0;
+}
+
 .group-head {
-  width: 100%;
+  flex: 1;
   display: flex;
   align-items: center;
   gap: 8px;
   border: 0;
-  border-bottom: 1px solid var(--line);
-  background: var(--soft);
+  background: transparent;
   padding: 10px 12px;
   cursor: pointer;
   font: inherit;
@@ -519,8 +529,10 @@ button:focus-visible,
   border-radius: 0;
 }
 
-.group-block.collapsed .group-head {
-  border-bottom: 0;
+.group-rename {
+  align-self: center;
+  margin-right: 8px;
+  flex-shrink: 0;
 }
 
 .group-block.collapsed .group-body {
