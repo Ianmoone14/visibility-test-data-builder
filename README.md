@@ -25,8 +25,8 @@ Visibility is a boolean expectation only:
 
 Default admin account (created on first startup if no users exist):
 
-- Username: `user`
-- Password: `Bojan1254`
+- Username: 
+- Password: 
 
 ## Features
 
