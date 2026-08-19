@@ -15,10 +15,11 @@
     collapsedGroups: {},
     editingElementId: null,
     editingTemplateId: null,
-    elementPickerQuery: "",
-    templatePickerQuery: "",
     templateSelectedIds: [],
     elementModalQuery: "",
+    scenarioElementSelectedIds: [],
+    scenarioElementModalQuery: "",
+    scenarioTemplateModalQuery: "",
   };
 
   const $ = (id) => document.getElementById(id);
@@ -122,7 +123,6 @@
       if (resetScenario) resetScenarioScreen();
       else {
         renderWorkspace();
-        renderFancyPickers();
       }
     }
     if (view === "users") loadUsers().catch((err) => toast(err.message, true));
@@ -144,7 +144,6 @@
     form.hidden = true;
     setError("scenario-error", "");
     $("scenario-select").value = "";
-    closePickers();
     renderScenarioSelect();
     renderWorkspace();
     clearExport();
@@ -262,13 +261,15 @@
     }
     renderElements();
     renderPicker();
-    renderFancyPickers();
+    syncScenarioPickerButtons();
+    if (!$("scenario-element-modal").hidden) renderScenarioElementModal();
   }
 
   async function loadTemplates() {
     state.templates = await api("/api/templates");
     renderTemplates();
-    renderFancyPickers();
+    syncScenarioPickerButtons();
+    if (!$("scenario-template-modal").hidden) renderScenarioTemplateModal();
   }
 
   async function loadScenarios() {
@@ -642,7 +643,7 @@
       ? "Temporary workspace — not saved until you click Save scenario"
       : state.activeScenario.description || "";
     renderScenarioElements();
-    renderFancyPickers();
+    syncScenarioPickerButtons();
   }
 
   function renderScenarioElements() {
@@ -677,92 +678,194 @@
       .join("");
   }
 
-  function closePickers() {
-    $("element-picker-menu").hidden = true;
-    $("template-picker-menu").hidden = true;
+  function syncScenarioPickerButtons() {
+    const has = !!state.activeScenario;
+    const addBtn = $("open-scenario-element-modal");
+    const tplBtn = $("open-scenario-template-modal");
+    if (addBtn) addBtn.disabled = !has;
+    if (tplBtn) tplBtn.disabled = !has;
   }
 
-  function renderFancyPickers() {
-    renderElementPickerOptions();
-    renderTemplatePickerOptions();
+  function usedElementIds() {
+    return new Set((state.activeScenario?.elements || []).map((e) => e.element_id));
   }
 
-  function renderElementPickerOptions() {
-    const root = $("element-picker-options");
+  function openScenarioElementModal() {
+    if (!state.activeScenario) return;
+    state.scenarioElementSelectedIds = [];
+    state.scenarioElementModalQuery = "";
+    $("scenario-element-modal-search").value = "";
+    $("scenario-element-modal").hidden = false;
+    renderScenarioElementModal();
+    $("scenario-element-modal-search").focus();
+  }
+
+  function closeScenarioElementModal() {
+    $("scenario-element-modal").hidden = true;
+  }
+
+  function renderScenarioElementModal() {
+    const root = $("scenario-element-modal-list");
+    const countEl = $("scenario-element-modal-count");
     if (!root) return;
-    if (!state.activeScenario) {
-      root.innerHTML = `<div class="picker-empty">Open a scenario first</div>`;
-      return;
-    }
-    const used = new Set(
-      (state.activeScenario.elements || []).map((e) => e.element_id)
-    );
-    const q = state.elementPickerQuery.trim().toLowerCase();
-    let available = state.elements.filter((e) => !used.has(e.id));
-    if (q) {
-      available = available.filter(
-        (e) =>
-          e.display_name.toLowerCase().includes(q) ||
-          e.technical_key.toLowerCase().includes(q) ||
-          groupNameOf(e).toLowerCase().includes(q)
-      );
-    }
-    if (!available.length) {
-      root.innerHTML = `<div class="picker-empty">No matching elements</div>`;
-      return;
-    }
-    root.innerHTML = groupElements(available)
-      .map(
-        ([group, items]) => `
-      <div class="picker-section">
-        <div class="picker-section-title">${esc(group)}</div>
-        ${items
-          .map(
-            (e) => `
-          <button type="button" class="picker-option" data-element-id="${e.id}">
-            <span class="picker-option-name">${esc(e.display_name)}</span>
-            <span class="picker-option-key">${esc(e.technical_key)}</span>
-          </button>`
-          )
-          .join("")}
-      </div>`
-      )
-      .join("");
-  }
+    const used = usedElementIds();
+    const selected = new Set(state.scenarioElementSelectedIds);
+    const availableSelected = [...selected].filter((id) => !used.has(id));
+    countEl.textContent = `${availableSelected.length} selected`;
 
-  function renderTemplatePickerOptions() {
-    const root = $("template-picker-options");
-    if (!root) return;
-    const q = state.templatePickerQuery.trim().toLowerCase();
-    let list = state.templates;
+    let list = state.elements;
+    const q = state.scenarioElementModalQuery.trim().toLowerCase();
     if (q) {
       list = list.filter(
-        (t) =>
-          t.name.toLowerCase().includes(q) ||
-          (t.description || "").toLowerCase().includes(q)
+        (el) =>
+          el.display_name.toLowerCase().includes(q) ||
+          el.technical_key.toLowerCase().includes(q) ||
+          groupNameOf(el).toLowerCase().includes(q)
       );
     }
+
     if (!list.length) {
-      root.innerHTML = `<div class="picker-empty">No templates</div>`;
+      root.innerHTML = `<div class="empty">No matching elements</div>`;
       return;
     }
-    root.innerHTML = list
-      .map((t) => {
-        const count = t.elements?.length || 0;
+
+    root.innerHTML = groupElements(list)
+      .map(([group, items]) => {
+        const selectable = items.filter((el) => !used.has(el.id));
+        const allOn =
+          selectable.length > 0 && selectable.every((el) => selected.has(el.id));
         return `
-        <button type="button" class="picker-option" data-template-id="${t.id}">
-          <span class="picker-option-name">${esc(t.name)}</span>
-          <span class="picker-option-key">${count} element${count === 1 ? "" : "s"}</span>
-        </button>`;
+        <div class="modal-group">
+          <div class="modal-group-head">
+            <span>${esc(group)}</span>
+            <button type="button" class="btn btn-sm" data-scenario-toggle-group="${esc(
+              group
+            )}" data-on="${allOn ? "0" : "1"}" ${
+          selectable.length ? "" : "disabled"
+        }>${allOn ? "Clear group" : "Select group"}</button>
+          </div>
+          <div class="modal-group-body">
+            ${items
+              .map((el) => {
+                const already = used.has(el.id);
+                const checked = already || selected.has(el.id);
+                return `
+              <label class="modal-option ${checked ? "checked" : ""} ${
+                  already ? "is-disabled" : ""
+                }">
+                <input type="checkbox" value="${el.id}" ${
+                  checked ? "checked" : ""
+                } ${already ? "disabled" : ""} />
+                <span>
+                  <strong>${esc(el.display_name)}</strong>
+                  <code>${esc(el.technical_key)}</code>
+                  ${
+                    already
+                      ? `<em class="modal-option-note">Already in scenario</em>`
+                      : ""
+                  }
+                </span>
+              </label>`;
+              })
+              .join("")}
+          </div>
+        </div>`;
       })
       .join("");
   }
 
-  async function addElementToScenario(elementId) {
+  function openScenarioTemplateModal() {
+    if (!state.activeScenario) return;
+    state.scenarioTemplateModalQuery = "";
+    $("scenario-template-modal-search").value = "";
+    $("scenario-template-modal").hidden = false;
+    renderScenarioTemplateModal();
+    $("scenario-template-modal-search").focus();
+  }
+
+  function closeScenarioTemplateModal() {
+    $("scenario-template-modal").hidden = true;
+  }
+
+  function renderScenarioTemplateModal() {
+    const root = $("scenario-template-modal-list");
+    if (!root) return;
+    const used = usedElementIds();
+    let list = state.templates;
+    const q = state.scenarioTemplateModalQuery.trim().toLowerCase();
+    if (q) {
+      list = list.filter(
+        (t) =>
+          t.name.toLowerCase().includes(q) ||
+          (t.description || "").toLowerCase().includes(q) ||
+          (t.elements || []).some(
+            (el) =>
+              el.display_name.toLowerCase().includes(q) ||
+              el.technical_key.toLowerCase().includes(q) ||
+              groupNameOf(el).toLowerCase().includes(q)
+          )
+      );
+    }
+    if (!list.length) {
+      root.innerHTML = `<div class="empty">No templates</div>`;
+      return;
+    }
+    root.innerHTML = list
+      .map((t) => {
+        const els = t.elements || [];
+        const newCount = els.filter((el) => !used.has(el.id)).length;
+        const groupsHtml = groupElements(els)
+          .map(
+            ([group, items]) => `
+            <div class="template-modal-group">
+              <div class="template-modal-group-title">${esc(group)}</div>
+              <div class="template-modal-tags">
+                ${items
+                  .map((el) => {
+                    const already = used.has(el.id);
+                    return `<span class="tag ${already ? "tag-muted" : ""}" title="${esc(
+                      el.technical_key
+                    )}">${esc(el.display_name)}${
+                      already ? " · in scenario" : ""
+                    }</span>`;
+                  })
+                  .join("")}
+              </div>
+            </div>`
+          )
+          .join("");
+        return `
+        <div class="template-modal-card" data-template-id="${t.id}">
+          <div class="template-modal-card-head">
+            <div>
+              <p class="name">${esc(t.name)}</p>
+              <p class="key">${esc(t.description || "No description")}</p>
+              <p class="template-modal-meta">${els.length} element${
+          els.length === 1 ? "" : "s"
+        } · ${newCount} new</p>
+            </div>
+            <button type="button" class="btn btn-sm btn-primary" data-use-template="${
+              t.id
+            }" ${els.length ? "" : "disabled"}>Use template</button>
+          </div>
+          <div class="template-modal-body">
+            ${
+              els.length
+                ? groupsHtml
+                : `<div class="empty">This template has no elements</div>`
+            }
+          </div>
+        </div>`;
+      })
+      .join("");
+  }
+
+  async function addElementToScenario(elementId, options = {}) {
+    const quiet = options.quiet === true;
     if (isDraft()) {
       if (state.activeScenario.elements.some((e) => e.element_id === elementId)) {
-        toast("Already in draft", true);
-        return;
+        if (!quiet) toast("Already in draft", true);
+        return false;
       }
       const el = state.elements.find((e) => e.id === elementId);
       if (!el) throw new Error("Element not found");
@@ -773,10 +876,12 @@
         group_name: el.group_name || "",
         is_visible: true,
       });
-      renderWorkspace();
-      refreshExport();
-      toast("Element added");
-      return;
+      if (!quiet) {
+        renderWorkspace();
+        refreshExport();
+        toast("Element added");
+      }
+      return true;
     }
     state.activeScenario = await api(
       `/api/scenarios/${state.activeScenario.id}/elements`,
@@ -785,9 +890,31 @@
         body: JSON.stringify({ element_id: elementId, is_visible: true }),
       }
     );
+    if (!quiet) {
+      renderWorkspace();
+      await refreshExport();
+      toast("Element added");
+    }
+    return true;
+  }
+
+  async function addSelectedElementsToScenario() {
+    const used = usedElementIds();
+    const ids = state.scenarioElementSelectedIds.filter((id) => !used.has(id));
+    if (!ids.length) {
+      toast("Select at least one element", true);
+      return;
+    }
+    let added = 0;
+    for (const id of ids) {
+      const ok = await addElementToScenario(id, { quiet: true });
+      if (ok) added += 1;
+    }
+    state.scenarioElementSelectedIds = [];
+    closeScenarioElementModal();
     renderWorkspace();
     await refreshExport();
-    toast("Element added");
+    toast(`${added} element${added === 1 ? "" : "s"} added`);
   }
 
   async function applyTemplateToActive(templateId) {
@@ -1192,68 +1319,76 @@
     }
   });
 
-  $("element-picker-trigger").addEventListener("click", (e) => {
-    e.stopPropagation();
-    const menu = $("element-picker-menu");
-    const open = menu.hidden;
-    closePickers();
-    if (open) {
-      menu.hidden = false;
-      state.elementPickerQuery = "";
-      $("element-picker-search").value = "";
-      renderElementPickerOptions();
-      $("element-picker-search").focus();
+  $("open-scenario-element-modal").addEventListener("click", () =>
+    openScenarioElementModal()
+  );
+  $("open-scenario-template-modal").addEventListener("click", () =>
+    openScenarioTemplateModal()
+  );
+
+  $("scenario-element-modal").addEventListener("click", (e) => {
+    if (e.target.closest("[data-close-scenario-element-modal]")) {
+      closeScenarioElementModal();
+      return;
+    }
+    const groupBtn = e.target.closest("[data-scenario-toggle-group]");
+    if (groupBtn) {
+      const group = groupBtn.dataset.scenarioToggleGroup;
+      const turnOn = groupBtn.dataset.on === "1";
+      const used = usedElementIds();
+      const ids = state.elements
+        .filter((el) => groupNameOf(el) === group && !used.has(el.id))
+        .map((el) => el.id);
+      const set = new Set(state.scenarioElementSelectedIds);
+      ids.forEach((id) => (turnOn ? set.add(id) : set.delete(id)));
+      state.scenarioElementSelectedIds = [...set];
+      renderScenarioElementModal();
     }
   });
 
-  $("template-picker-trigger").addEventListener("click", (e) => {
-    e.stopPropagation();
-    const menu = $("template-picker-menu");
-    const open = menu.hidden;
-    closePickers();
-    if (open) {
-      menu.hidden = false;
-      state.templatePickerQuery = "";
-      $("template-picker-search").value = "";
-      renderTemplatePickerOptions();
-      $("template-picker-search").focus();
+  $("scenario-element-modal-list").addEventListener("change", (e) => {
+    const input = e.target.closest('input[type="checkbox"]');
+    if (!input || input.disabled) return;
+    const id = Number(input.value);
+    const set = new Set(state.scenarioElementSelectedIds);
+    if (input.checked) set.add(id);
+    else set.delete(id);
+    state.scenarioElementSelectedIds = [...set];
+    renderScenarioElementModal();
+  });
+
+  $("scenario-element-modal-search").addEventListener("input", (e) => {
+    state.scenarioElementModalQuery = e.target.value;
+    renderScenarioElementModal();
+  });
+
+  $("scenario-element-modal-clear").addEventListener("click", () => {
+    state.scenarioElementSelectedIds = [];
+    renderScenarioElementModal();
+  });
+
+  $("scenario-element-modal-add").addEventListener("click", () => {
+    addSelectedElementsToScenario().catch((err) => toast(err.message, true));
+  });
+
+  $("scenario-template-modal").addEventListener("click", async (e) => {
+    if (e.target.closest("[data-close-scenario-template-modal]")) {
+      closeScenarioTemplateModal();
+      return;
     }
-  });
-
-  $("element-picker-search").addEventListener("input", (e) => {
-    state.elementPickerQuery = e.target.value;
-    renderElementPickerOptions();
-  });
-
-  $("template-picker-search").addEventListener("input", (e) => {
-    state.templatePickerQuery = e.target.value;
-    renderTemplatePickerOptions();
-  });
-
-  $("element-picker-options").addEventListener("click", async (e) => {
-    const opt = e.target.closest("[data-element-id]");
-    if (!opt || !state.activeScenario) return;
+    const useBtn = e.target.closest("[data-use-template]");
+    if (!useBtn || !state.activeScenario) return;
     try {
-      await addElementToScenario(Number(opt.dataset.elementId));
-      closePickers();
+      await applyTemplateToActive(Number(useBtn.dataset.useTemplate));
+      closeScenarioTemplateModal();
     } catch (err) {
       toast(err.message, true);
     }
   });
 
-  $("template-picker-options").addEventListener("click", async (e) => {
-    const opt = e.target.closest("[data-template-id]");
-    if (!opt || !state.activeScenario) return;
-    try {
-      await applyTemplateToActive(Number(opt.dataset.templateId));
-      closePickers();
-    } catch (err) {
-      toast(err.message, true);
-    }
-  });
-
-  document.addEventListener("click", (e) => {
-    if (!e.target.closest(".fancy-picker")) closePickers();
+  $("scenario-template-modal-search").addEventListener("input", (e) => {
+    state.scenarioTemplateModalQuery = e.target.value;
+    renderScenarioTemplateModal();
   });
 
   $("scenario-elements").addEventListener("click", async (e) => {
@@ -1359,7 +1494,10 @@
   });
 
   document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && !$("element-modal").hidden) closeElementModal();
+    if (e.key !== "Escape") return;
+    if (!$("element-modal").hidden) closeElementModal();
+    if (!$("scenario-element-modal").hidden) closeScenarioElementModal();
+    if (!$("scenario-template-modal").hidden) closeScenarioTemplateModal();
   });
 
   $("template-form").addEventListener("submit", async (e) => {
